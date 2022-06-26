@@ -35,7 +35,17 @@
 
 ## 行情接口分析
 
-### 行情概况
+QMT行情有两套不同的处理逻辑：
+- 数据查询接口：使用时需要先确保MiniQmt已有所需要的数据，如果不足可以通过补充数据接口补充，再调用数据获取接口获取。适用于少量的实时行情数据和大批量的历史行情数据。
+- 订阅接口：直接设置数据回调，数据到来时会由回调返回。订阅接收到的数据一般会保存下来，同种数据不需要再单独补充。适用于大批量的实时行情数据。
+
+按照类别，主要有以下四类：
+- 行情数据（K线数据、分笔数据，订阅和主动获取的接口）
+- 财务数据
+- 合约基础信息
+- 基础行情数据板块分类信息等基础信息
+
+### 行情接口概况
 
 首先导入行情库：
 ``` python
@@ -43,13 +53,63 @@ from xtquant import xtdata
 print(dir(xtdata))
 ```
 可以看到行情主要分为以下几个模块：
-- 基本信息和行情查询：get_* 系列
 - 实时行情订阅：subscribe* 系列
-- 历史数据下载： download_* 系列 以及 getLocal*后处理处理模块
+- 基本信息和行情查询：get_* 系列
+- 历史数据订阅： download_* 系列 
+- 历史数据处理： get_local_data
 
-针对数据存储目录，默认为`xtdata.data_dir=../userdata_mini/datadir`, 我们可以自行设置到一块空间比较大的目录中。
+针对数据存储目录，默认为`xtdata.data_dir=../userdata_mini/datadir`, 按照官方文档的说明似乎可以任意设置，但实操下来却发现没起到作用。因此，如果默认存储空间有限的话，我们可以将其移动到有较大空间的地方，然后创建一个快捷方式指向原来的地方，避免磁盘空间被耗尽。
 
-### 基本信息
+### 实战：历史行情数据下载
+
+QMT提供的下载接口有两个：
+- 单支股票下载：download_history_data(stock_code, period, start_time='', end_time='')
+- 批量股票下载：download_history_data2(stock_list, period, start_time='', end_time='',callback=None)
+
+其中各个参数具体含义如下：
+- stock_code：股票名，以`code.exchange`的形式表示，exchange可从如下品种中选择
+    - 上海证券(SH), 如`510050.SH`
+    - 深圳证券(SZ), 如`159919.SZ`
+    - 上海期权(SHO), 如`10004268.SHO`
+    - 深圳期权(SZO), 如`90000967.SZO`
+    - 中国金融期货(CFFEX), 如`IC07.CFFEX`
+    - 郑州商品期货(CZCE), 如`SR05.CZCE`
+    - 大连商品期货(DCE), 如`m2212.DCE`
+    - 上海期货(SHFE), 如`wr2209.SHFE`
+    - 香港联交所(HK), 如`00700.HK`
+- stock_list, 股票列表，如['510050.SH', '159919.SZ']
+- period, 数据周期，可选`1m`、`5m`、`1d`、`tick`, 分别表示1分钟K线、5分钟K线、1天K线、分笔数据
+- start_time, 数据起始时间，格式YYYYMMDD/YYYYMMDDhhmmss/YYYYMMDDhhmmss.milli，如 "20200427" "20200427093000" "20200427093000.000"
+- end_time，数据结束时间，格式同start_time
+
+如果运行如下代码，下载深圳市场300ETF期权`沪深300ETF购9月4900`标的的tick行情，就会在`userdata_mini\datadir\SZO\0\90000967`目录下生成以日为单位的tick数据：
+
+``` python
+import pandas as pd
+from xtquant import xtdata
+
+xtdata.download_history_data('90000967.SZO', period='tick')
+data = xtdata.get_local_data(field_list=[], stock_code=['90000967.SZO'], period='tick', count=10)
+
+df = pd.DataFrame(data['90000967.SZO'])
+print(df.iloc[-1])
+
+```
+
+通过`get_local_data`接口，便可读取已经下载的上述tick行情，包含时间戳、K线、买五卖五快照信息等
+
+![tick行情](misc/option_tick_data.png)
+
+
+### 实战：历史行情转存数据库
+
+1、板块内股票批量下载
+
+2、Clickhouse数据库设计
+
+3、Clickhouse数据批量写入
+
+### 实战：实时行情订阅
 
 
 未完待续......
