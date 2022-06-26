@@ -62,7 +62,7 @@ print(dir(xtdata))
 
 ### 实战：历史行情数据下载
 
-QMT提供的下载接口有两个：
+QMT提供的历史行情下载接口有两个：
 - 单支股票下载：download_history_data(stock_code, period, start_time='', end_time='')
 - 批量股票下载：download_history_data2(stock_list, period, start_time='', end_time='',callback=None)
 
@@ -76,6 +76,7 @@ QMT提供的下载接口有两个：
     - 郑州商品期货(CZCE), 如`SR05.CZCE`
     - 大连商品期货(DCE), 如`m2212.DCE`
     - 上海期货(SHFE), 如`wr2209.SHFE`
+    - 能源中心(INE), 如`sc00.INE`
     - 香港联交所(HK), 如`00700.HK`
 - stock_list, 股票列表，如['510050.SH', '159919.SZ']
 - period, 数据周期，可选`1m`、`5m`、`1d`、`tick`, 分别表示1分钟K线、5分钟K线、1天K线、分笔数据
@@ -96,10 +97,20 @@ print(df.iloc[-1])
 
 ```
 
-通过`get_local_data`接口，便可读取已经下载的上述tick行情，包含时间戳、K线、买五卖五快照信息等
+![数据文件](misc/data_file.png)
+
+上述二进制文件是无法直接读取的，这里通过`get_local_data`接口进行数据文件的解析，便可解码已经下载的上述tick行情，包含Unix时间戳、K线、买五卖五快照信息等：
 
 ![tick行情](misc/option_tick_data.png)
 
+注意到这里的Unix时间戳是精确到毫秒的，可以通过datetime转换成字符型：
+``` Python
+import datetime
+df['datetime'] = df['time'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1000.0))
+print(df)
+```
+
+![tick行情](misc/option_tick_timestamp.png)
 
 ### 实战：历史行情转存数据库
 
