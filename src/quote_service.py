@@ -13,9 +13,10 @@ api = Blueprint('xtdata', url_prefix='/quote/xtdata')
 @api.listener('before_server_start')
 async def before_server_start(app, loop):
     '''全局共享session'''
-    global session
+    global session, base_url
     jar = aiohttp.CookieJar(unsafe=True)
     session = aiohttp.ClientSession(cookie_jar=jar, connector=aiohttp.TCPConnector(ssl=False))
+    base_url = 'http://127.0.0.1:7700/quote/xtdata'
 
 async def req_json(url):
     async with session.get(url) as resp:
@@ -96,6 +97,7 @@ def download_history_bond_tick(init=1):
             
         xtdata.download_history_data(stock_code=bond, period='tick', start_time=start_date)
         xtdata.download_history_data(stock_code=stock, period='tick', start_time=start_date)
+    
 
 def download_history_kline(code_list, start_time='', period='1m'):
     '''
@@ -155,9 +157,9 @@ def get_sector_list():
 
     return code_list
 
-def get_local_kline_data(code='230130.BKZS', start_time='20200101', period='1d', code_list =  get_sector_list()):
+def get_local_kline_data(code='230130.BKZS', start_time='20200101', period='1d', code_list=get_sector_list()):
     # 获取本地数据
-    df = xtdata.get_local_data(stock_code=[code], period='1d', field_list=['time', 'open', 'close', 'high', 'low', 'volume', 'amount'], start_time=start_time, end_time=datetime.datetime.now().strftime('%Y%m%d%H%M%S'))
+    df = xtdata.get_local_data(stock_code=[code], period=period, field_list=['time', 'open', 'close', 'high', 'low', 'volume', 'amount'], start_time=start_time, end_time=datetime.datetime.now().strftime('%Y%m%d%H%M%S'))
     df = pd.concat([df[i].T.rename(columns={code:i}) for i in ['time', 'open', 'close', 'high', 'low', 'volume', 'amount']], axis=1)
 
     if len(df) < 1:
@@ -173,7 +175,7 @@ def get_local_kline_data(code='230130.BKZS', start_time='20200101', period='1d',
     df = df[['code', 'trade_day', 'sector_name', 'sector_type', 'open', 'close', 'high', 'low', 'volume', 'amount']]
 
     return df
-    
+
 def store_history_bond_tick(init=1):
     # 定义Clickhouse客户端
     if init:
@@ -181,10 +183,45 @@ def store_history_bond_tick(init=1):
         pass
 
 
+@api.route('/sync/bond/tick', methods=['GET'])
+async def sync_bond_tick(request):
+    stock_code_list, bond_code_list = get_bond_spot()
+    # 数据下载目录
+    data_dir = 'E:\\QMT\\userdata_mini\\datadir\\'
+    for stock, bond in tqdm(zip(stock_code_list, bond_code_list), total=len(stock_code_list)):
+        print("开始下载：股票 {}, 转债 {}".format(stock, bond))
+        # 上海转债: 已下载的数据
+        if bond.endswith("SH"):
+            dir_path = data_dir + "\\SH\\0\\" + bond.split('.', 1)[0]
+        # 深圳转债：已下载的数据
+        else:
+            dir_path = data_dir + "\\SZ\\0\\" + bond.split('.', 1)[0]
+        
+        start_date = '20200401' # QMT支持的最久数据时间
+        # 如果路径存在，断点续传，重设起点下载时间
+        if os.path.exists(dir_path):
+            downloaded = os.listdir(dir_path)
+            # 获取已下载的最大日期，作为本次同步的起始时间
+            if len(downloaded) > 0:
+                start_date = max(downloaded).split('.', 1)[0]
+            
+        xtdata.download_history_data(stock_code=bond, period='tick', start_time=start_date)
+
+    return response.json({"status": 0}, ensure_ascii=False)
+
+@api.route('/sync/stock/kline', methods=['GET'])
+async def sync_stock_kline(request):
+    code_list = get_shse_a_list()
+    start_time = request.args.get('start_time', "20220630160000")
+    period = request.args.get('period', "1m")
+    for code in tqdm(code_list):
+        xtdata.download_history_data(code, period=period, start_time=start_time)
+    return response.json({"status": 0}, ensure_ascii=False)
+
 if __name__ == '__main__':
     app = Sanic(name='xtdata')
     app.config.RESPONSE_TIMEOUT = 600000
     app.config.REQUEST_TIMEOUT = 600000
     app.config.KEEP_ALIVE_TIMEOUT = 600
     app.blueprint(api)
-    app.run(host='0.0.0.0', port=7000, workers=1, auto_reload=True, debug=False)
+    app.run(host='0.0.0.0', port=7700, workers=1, auto_reload=True, debug=False)
