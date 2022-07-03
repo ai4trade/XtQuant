@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from xtquant import xtdata
-import aiohttp, datetime, os
+import aiohttp, datetime, os, math
 import akshare as ak
 from tqdm import tqdm
 import pandas as pd
@@ -97,16 +97,83 @@ def download_history_bond_tick(init=1):
         xtdata.download_history_data(stock_code=bond, period='tick', start_time=start_date)
         xtdata.download_history_data(stock_code=stock, period='tick', start_time=start_date)
 
-def download_history_kline(start_time='', period='1m'):
+def download_history_kline(code_list, start_time='', period='1m'):
     '''
-    下载历史K线数据
+    下载历史K线数据:
+    code_list: 股票代码， 如：get_shse_a_list()
     '''
-    code_list = get_shse_a_list()
     print("本次开始下载的时间为：", datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
     for code in tqdm(code_list):
         xtdata.download_history_data(code, period=period, start_time=start_time)
 
 
+def get_local_tick_data(code='110075.SH', start_time='19700101'):
+    # 获取本地数据
+    df = xtdata.get_local_data(stock_code=[code], period='tick', field_list=['time', 'open', 'lastPrice', 'high', 'low', 'lastClose', 'volume', 'amount', 'askPrice', 'bidPrice', 'askVol', 'bidVol'], start_time=start_time, end_time=start_time)
+
+    # 转成DataFRame
+    df = pd.DataFrame(df[code])
+    if len(df) < 1:
+        return df
+
+    # 日期处理
+    df['trade_time'] = df['time'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1000.0)) # , cn_tz
+    df['trade_day'] = df['trade_time'].apply(lambda x: x.date())
+    df['trade_minute'] = df['trade_time'].apply(lambda x: x.hour * 60 + x.minute)
+    df['trade_second'] = df['trade_time'].apply(lambda x: x.hour * 3600 + x.minute * 60 + x.second)
+    df = df[df.trade_second <= 54001] # 排除盘后交易
+    df = df[df.trade_second >= 33840] # 保留最后一分钟的集合竞价数据
+    df = df.reset_index(drop=True)
+
+    # 重新计算成交量、成交额
+    df['volume_deal'] = df.groupby(['trade_day'])['volume'].diff(periods=1).fillna(0)
+    df['amount_deal'] = df.groupby(['trade_day'])['amount'].diff(periods=1).fillna(0)
+
+    # 重新选择列
+    df['code'] = '110075.SH'
+    df['close'] = df['lastPrice'] # 收盘
+    df['last'] = df['lastClose'] # 昨收
+    df = df[['code', 'trade_time', 'trade_day', 'trade_minute', 'open', 'close', 'high', 'low', 'last', 'volume', 'amount', 'volume_deal', 'amount_deal', 'askPrice', 'bidPrice', 'askVol', 'bidVol']]
+
+    return df
+
+
+def get_sector_list():
+    '''
+    获取沪深指数、行业指数
+    '''
+    sector_1 = xtdata.get_stock_list_in_sector('证监会行业板块指数')
+    sector_1 = [(i, xtdata.get_instrument_detail(i)['InstrumentName'], '证监会一级行业') for i in sector_1]
+
+    sector_2 = xtdata.get_stock_list_in_sector('板块指数')
+    sector_2 = [(i, xtdata.get_instrument_detail(i)['InstrumentName'], '证监会二级行业') for i in sector_2 if i.startswith('23')]
+
+
+    index_code = [('000001.SH', '上证指数', '大盘指数'), ('399001.SZ', '深证成指', '大盘指数'), ('399006.SZ', '创业板指', '大盘指数'), ('000688.SH', '科创50', '大盘指数'), ('000300.SH', '沪深300', '大盘指数'), ('000016.SH', '上证50', '大盘指数'), ('000905.SH', '中证500', '大盘指数'), ('000852.SH', '中证1000', '大盘指数')]
+
+    code_list = {i[0]: i[1:] for i in sector_1 + sector_2 + index_code}
+
+    return code_list
+
+def get_local_kline_data(code='230130.BKZS', start_time='20200101', period='1d', code_list =  get_sector_list()):
+    # 获取本地数据
+    df = xtdata.get_local_data(stock_code=[code], period='1d', field_list=['time', 'open', 'close', 'high', 'low', 'volume', 'amount'], start_time=start_time, end_time=datetime.datetime.now().strftime('%Y%m%d%H%M%S'))
+    df = pd.concat([df[i].T.rename(columns={code:i}) for i in ['time', 'open', 'close', 'high', 'low', 'volume', 'amount']], axis=1)
+
+    if len(df) < 1:
+        return df
+
+    # 时间转换
+    df['trade_day'] = df['time'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1000.0).date())
+
+    # 重新选择列
+    df['code'] = code
+    df['sector_name'] = df['code'].apply(lambda x: code_list[x][0])
+    df['sector_type'] = df['code'].apply(lambda x: code_list[x][1])
+    df = df[['code', 'trade_day', 'sector_name', 'sector_type', 'open', 'close', 'high', 'low', 'volume', 'amount']]
+
+    return df
+    
 def store_history_bond_tick(init=1):
     # 定义Clickhouse客户端
     if init:
