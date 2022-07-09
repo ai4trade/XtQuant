@@ -18,6 +18,11 @@ async def before_server_start(app, loop):
     session = aiohttp.ClientSession(cookie_jar=jar, connector=aiohttp.TCPConnector(ssl=False))
     base_url = 'http://127.0.0.1:7700/quote/xtdata'
 
+@api.listener('after_server_stop')
+async def after_server_stop(app, loop):
+    '''关闭session'''
+    await session.close()
+
 async def req_json(url):
     async with session.get(url) as resp:
         return await resp.json()

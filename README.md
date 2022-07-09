@@ -444,4 +444,4 @@ for code in tqdm(sector_code_list):
 
 欢迎关注我的公众号“**量化实战**”，原创技术文章第一时间推送。
 
-![公众号](misc/qrcode.png)
+![公众号](misc/qrcode.jpg)
