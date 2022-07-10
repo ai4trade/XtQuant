@@ -3,7 +3,7 @@
 from xtquant import xtdata, xttrader, xtconstant
 from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
-import aiohttp, random
+import aiohttp, random, time
 from sanic import Sanic, Blueprint, response
 
 api = Blueprint('xtquant', url_prefix='/xtquant/trade')
@@ -11,15 +11,20 @@ api = Blueprint('xtquant', url_prefix='/xtquant/trade')
 @api.listener('before_server_start')
 async def before_server_start(app, loop):
     '''全局共享session'''
-    global session, trader
+    global session, trader, base_url
     jar = aiohttp.CookieJar(unsafe=True)
     session = aiohttp.ClientSession(cookie_jar=jar, connector=aiohttp.TCPConnector(ssl=False))
     trader = Trader()
+    base_url = 'http://127.0.0.1:7800/xtquant/trade'
 
 @api.listener('after_server_stop')
 async def after_server_stop(app, loop):
     '''关闭session'''
     await session.close()
+
+async def req_json(url):
+    async with session.get(url) as resp:
+        return await resp.json()
 
 order_status = {
     xtconstant.ORDER_UNREPORTED: '未报',
@@ -143,7 +148,15 @@ async def trade_place_order(request):
     direction = xtconstant.STOCK_BUY if request.args.get('direction', 'buy') == 'buy' else xtconstant.STOCK_SELL
     volumn = int(request.args.get('volumn', '100'))
     price = float(request.args.get('price', '4.4'))
-    order_id = trader.xt_trader.order_stock(trader.account, stock_code, direction, volumn, xtconstant.FIX_PRICE, price, 'strategy_name', 'remark')
+    order_check = [] # 检查订单是否创建成功
+
+    for _ in range(5): # 重复检查5次
+        order_id = trader.xt_trader.order_stock(trader.account, stock_code, direction, volumn, xtconstant.FIX_PRICE, price, 'strategy_name', 'remark')
+        time.sleep(2)
+        # 检查订单是否创建成功
+        order_check = await req_json(base_url + '/query/order?order_id={}'.format(order_id))
+        if len(order_check) > 0:
+            break
     return response.json({'order_id': order_id}, ensure_ascii=False)
 
 @api.route('/cancel_order', methods=['GET'])
@@ -162,5 +175,5 @@ if __name__ == '__main__':
     app.config.REQUEST_TIMEOUT = 600000
     app.config.KEEP_ALIVE_TIMEOUT = 600
     app.blueprint(api)
-    app.run(host='0.0.0.0', port=7800, workers=1, auto_reload=True, debug=False)
+    app.run(host='127.0.0.1', port=7800, workers=1, auto_reload=True, debug=False)
 
