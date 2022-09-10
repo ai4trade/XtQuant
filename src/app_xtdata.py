@@ -5,21 +5,27 @@ import aiohttp, akshare, re, datetime, math, requests, pytz
 import pandas as pd
 from sanic import Sanic, Blueprint, response
 import pandas_market_calendars as mcal
+from collections import defaultdict
 
 api = Blueprint('xtdata', url_prefix='/api/xtdata')
 
 @api.listener('before_server_start')
 async def before_server_start(app, loop):
     '''全局共享session'''
-    global session, cn_calendar, cn_tz, a_index_etf, a_index_component, etf_option, hk_index_comonent
+    global session, cn_calendar, cn_tz, subscribe_ids, hs300_component, csi500_component, csi1000_component
     jar = aiohttp.CookieJar(unsafe=True)
     session = aiohttp.ClientSession(cookie_jar=jar, connector=aiohttp.TCPConnector(ssl=False))
     cn_calendar = mcal.get_calendar('SSE')
     cn_tz = pytz.timezone('Asia/Shanghai')
+    subscribe_ids = []
+    subscribe_ids.append(xtdata.subscribe_whole_quote(['SH', 'SZ', 'SHO', 'SZO', 'HK', 'IF', 'ZF', 'DF', 'SF']))
+    hs300_component, csi500_component, csi1000_component = get_a_index_component()
 
 @api.listener('after_server_stop')
 async def after_server_stop(app, loop):
     '''关闭session'''
+    for seq_num in subscribe_ids:
+        xtdata.unsubscribe_quote(seq_num)
     await session.close()
 
 async def req_json(url):
@@ -154,11 +160,133 @@ def get_hk_index_comonent():
             pass
     return component["HSI"], component["HSTECH"]
 
+@api.route('/subscribe', methods=['GET'])
+async def subscribe(request, ticker_input=''):
+    '''
+    订阅单股行情: 获得tick/kline行情
+    '''
+    if ticker_input == '':
+        ticker = request.args.get("ticker", "000001.SH")
+    else:
+        ticker = ticker_input
+    period = request.args.get("period", "1m")
+    start_time = request.args.get("start_time", "")
+    end_time = request.args.get("end_time", "")
+    subscribe_ids.append(xtdata.subscribe_quote(ticker, period, start_time=start_time, end_time=end_time, count=10))
+    if ticker_input == '':
+        return response.json({"data": subscribe_ids[-1]})
+    else:
+        return {"data": subscribe_ids[-1]}
+
+@api.route('/download/history_data', methods=['GET'])
+async def download_history_data(request):
+    '''
+    批量下载: 获得tick/kline数据
+    '''
+    ticker = request.args.get("ticker", "IM00.IF")
+    period = request.args.get("period", "1m")
+    start_time = request.args.get("start_time", "")
+    end_time = request.args.get("end_time", "")
+
+    xtdata.download_history_data(stock_code=ticker, period=period, start_time=start_time, end_time=end_time)
+    return response.json({"download": ticker, "period": period})
+
+@api.route('/download/basic_data', methods=['GET'])
+async def download_basic_data(request):
+    '''
+    下载基础数据: 财务报表、板块分类
+    '''
+    print("下载板块分类信息... ",  xtdata.download_sector_data())
+    print("下载指数成分权重信息... ",  xtdata.download_index_weight())
+    print("下载历史合约... ",  xtdata.download_history_contracts())
+    all_a_stock = xtdata.get_stock_list_in_sector('沪深A股') 
+    print("下载财务数据... ",  xtdata.download_financial_data(all_a_stock))
+
+
+@api.route('/quote/kline', methods=['GET'])
+async def quote_kline(request, tickers=''):
+    '''
+    查询市场行情: 获得kline数据
+    '''
+    if tickers == '':
+        tickers = request.args.get("tickers", "IM00.IF,159919.SZ,00700.HK,10004407.SHO")
+    period = request.args.get("period", "1m")
+    start_time = request.args.get("start_time", "")
+    end_time = request.args.get("end_time", "")
+    count = request.args.get("count", "1")
+    dividend_type = request.args.get("dividend_type", "none") # none 不复权 front 前复权 back 后复权 front_ratio 等比前复权 back_ratio 等比后复权
+    stock_list = tickers.split(',')
+
+    kline_data = xtdata.get_market_data(field_list=['time', 'open', 'high', 'low', 'close', 'volume', 'amount'], stock_list=stock_list, period=period, start_time=start_time, end_time=end_time, count=int(count), dividend_type=dividend_type, fill_data=True)
+
+    quote_data = {}
+    for stock in stock_list:
+        df = pd.concat([kline_data[i].loc[stock].T for i in ['time', 'open', 'high', 'low', 'close', 'volume', 'amount']], axis=1)
+        df.columns = ['time', 'open', 'high', 'low', 'close', 'volume', 'amount']
+        df = df[df.volume !=0]
+        df['time'] = df['time'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1000.0).strftime("%Y-%m-%d %H:%M:%S"))
+        df['ticker'] = stock
+        df = df[['ticker', 'time', 'open', 'high', 'low', 'close', 'volume', 'amount']].values.tolist() 
+        quote_data[stock] = df
+
+    return response.json({"data": quote_data})
+
+@api.route('/quote/tick', methods=['GET'])
+async def quote_tick(request):
+    '''
+    查询市场行情: 获得tick数据
+    '''
+    tickers = request.args.get("tickers", "159919.SZ,00700.HK")
+    stock_list = tickers.split(',')
+    data = xtdata.get_full_tick(stock_list)
+    return response.json({"data": data})
+
+@api.route('/subscribe/kline/hs300', methods=['GET'])
+async def quote_kline_hs300(request):
+    '''
+    订阅市场行情: 沪深300成分股1分钟K线行情
+    '''
+    seq_ids = []
+    for ticker in hs300_component:
+       seq_id =  await subscribe(request, ticker_input=ticker)
+       seq_ids.append(seq_id.get('data', -1))
+    return response.json({"data": seq_ids})
+
+
+@api.route('/quote/kline/hs300', methods=['GET'])
+async def quote_kline_hs300(request):
+    '''
+    查询市场行情: 沪深300成分股1分钟K线行情
+    '''
+    return await quote_kline(request, ','.join(list(hs300_component)))
+
+@api.route('/quote/instrument/detail', methods=['GET'])
+async def get_instrument_detail(request):
+    '''
+    获取合约基础信息
+    '''
+    ticker = request.args.get("ticker", "159919.SZ")
+    return response.json({"data": xtdata.get_instrument_detail(ticker)})
+
+@api.route('/quote/sector/list', methods=['GET'])
+async def get_sector_list(request):
+    '''
+    获取板块列表
+    '''
+    return response.json({"data": xtdata.get_sector_list()})
+
+@api.route('/quote/sector/component', methods=['GET'])
+async def get_sector_component(request):
+    '''
+    获取板块成分股列表
+    '''
+    sector_name = request.args.get("sector", "沪深ETF")
+    return response.json({"data": xtdata.get_stock_list_in_sector(sector_name)})
 
 if __name__ == '__main__':
     app = Sanic(name='xtquant')
     app.config.RESPONSE_TIMEOUT = 600000
     app.config.REQUEST_TIMEOUT = 600000
-    app.config.KEEP_ALIVE_TIMEOUT = 600
+    app.config.KEEP_ALIVE_TIMEOUT = 6000
     app.blueprint(api)
-    app.run(host='127.0.0.1', port=7800, workers=1, auto_reload=True, debug=False)
+    app.run(host='0.0.0.0', port=7800, workers=4, auto_reload=True, debug=False)
