@@ -3,16 +3,19 @@
 from xtquant import xtdata
 import aiohttp, akshare, re, datetime, math, requests, pytz
 import pandas as pd
+import numpy as np
 from sanic import Sanic, Blueprint, response
 import pandas_market_calendars as mcal
 from collections import defaultdict
+import pandas_ta as ta
+from tqdm import tqdm
 
 api = Blueprint('xtdata', url_prefix='/api/xtdata')
 
 @api.listener('before_server_start')
 async def before_server_start(app, loop):
     '''全局共享session'''
-    global session, cn_calendar, cn_tz, subscribe_ids, hs300_component, csi500_component, csi1000_component
+    global session, cn_calendar, cn_tz, subscribe_ids, hs300_component, csi500_component, csi1000_component, all_a_tickers, last_day_price
     jar = aiohttp.CookieJar(unsafe=True)
     session = aiohttp.ClientSession(cookie_jar=jar, connector=aiohttp.TCPConnector(ssl=False))
     cn_calendar = mcal.get_calendar('SSE')
@@ -20,6 +23,8 @@ async def before_server_start(app, loop):
     subscribe_ids = []
     subscribe_ids.append(xtdata.subscribe_whole_quote(['SH', 'SZ', 'SHO', 'SZO', 'HK', 'IF', 'ZF', 'DF', 'SF']))
     hs300_component, csi500_component, csi1000_component = get_a_index_component()
+    all_a_tickers = get_all_a_tickers()
+    last_day_price = get_last_day_price(all_a_tickers)
 
 @api.listener('after_server_stop')
 async def after_server_stop(app, loop):
@@ -191,6 +196,31 @@ async def download_history_data(request):
     xtdata.download_history_data(stock_code=ticker, period=period, start_time=start_time, end_time=end_time)
     return response.json({"download": ticker, "period": period})
 
+def get_all_a_tickers():
+    # 沪深指数
+    index_ticker = xtdata.get_stock_list_in_sector("沪深指数")
+    # 沪深A股
+    stock_ticker = xtdata.get_stock_list_in_sector("沪深A股")
+    # 沪深债券
+    bond_ticker = xtdata.get_stock_list_in_sector("沪深债券")
+    # 板块指数
+    sector_ticker = xtdata.get_stock_list_in_sector("板块指数")
+    # 沪深基金
+    fund_ticker = xtdata.get_stock_list_in_sector("沪深基金")
+    tickers = index_ticker + stock_ticker + bond_ticker + sector_ticker + fund_ticker
+    return tickers
+
+@api.route('/download/kline/1m', methods=['GET'])
+async def download_kline_1m(request):
+    '''
+    下载A股市场全部1分钟K线
+    '''
+    start_time = request.args.get("start_time", datetime.datetime.now().strftime("%Y%m%d000001"))
+    
+    for ticker in tqdm(all_a_tickers):
+       xtdata.download_history_data(stock_code=ticker, period='1m', start_time=start_time, end_time='')
+    return response.json({"data": len(all_a_tickers)})
+
 @api.route('/download/basic_data', methods=['GET'])
 async def download_basic_data(request):
     '''
@@ -201,7 +231,6 @@ async def download_basic_data(request):
     print("下载历史合约... ",  xtdata.download_history_contracts())
     all_a_stock = xtdata.get_stock_list_in_sector('沪深A股') 
     print("下载财务数据... ",  xtdata.download_financial_data(all_a_stock))
-
 
 @api.route('/quote/kline', methods=['GET'])
 async def quote_kline(request, tickers=''):
@@ -242,7 +271,7 @@ async def quote_tick(request):
     return response.json({"data": data})
 
 @api.route('/subscribe/kline/hs300', methods=['GET'])
-async def quote_kline_hs300(request):
+async def subscribe_kline_hs300(request):
     '''
     订阅市场行情: 沪深300成分股1分钟K线行情
     '''
@@ -251,7 +280,6 @@ async def quote_kline_hs300(request):
        seq_id =  await subscribe(request, ticker_input=ticker)
        seq_ids.append(seq_id.get('data', -1))
     return response.json({"data": seq_ids})
-
 
 @api.route('/quote/kline/hs300', methods=['GET'])
 async def quote_kline_hs300(request):
@@ -282,6 +310,67 @@ async def get_sector_component(request):
     '''
     sector_name = request.args.get("sector", "沪深ETF")
     return response.json({"data": xtdata.get_stock_list_in_sector(sector_name)})
+
+def get_last_day_price(tickers=['159919.SZ', '510050.SH', '000810.SZ'], trade_day=datetime.date.today().strftime("%Y%m%d")):
+    kline_data = xtdata.get_market_data(field_list=['close'], stock_list=tickers, period='1m', start_time='', end_time=trade_day + '080000', count=1, dividend_type='front', fill_data=True)
+    result = {}
+    for ticker in tickers:
+        result[ticker] = kline_data['close'].loc[ticker].values[0]
+    return result
+
+@api.route('/feature/tech', methods=['GET'])
+async def feature_tech(request, tickers=''):
+    '''
+    计算实时技术特征
+    '''
+    if tickers == '':
+        tickers = request.args.get("tickers", "159919.SZ,510050.SH,000810.SZ")
+    stock_list = tickers.split(',')
+    start_time = request.args.get("start_time", datetime.datetime.now().strftime("%Y%m%d000001"))
+    end_time = request.args.get("end_time", datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
+
+    kline_data = xtdata.get_market_data(field_list=['time', 'open', 'high', 'low', 'close', 'volume', 'amount'], stock_list=stock_list, period='1m', start_time=start_time, end_time=end_time)
+
+    features = []
+    for stock in stock_list:
+        kline_df = pd.concat([kline_data[i].loc[stock].T for i in ['time', 'open', 'high', 'low', 'close', 'volume', 'amount']], axis=1)
+        kline_df.columns = ['time', 'open', 'high', 'low', 'close', 'volume', 'amount']
+        kline_df['trade_time'] = kline_df['time'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1000.0))
+        ticker= stock.split('.')[0] + {'SH': '.XSHG', 'SZ': '.XSHE'}.get(stock.split('.')[1])
+        trade_date = kline_df['trade_time'].iloc[0].strftime("%Y-%m-%d")
+        trade_time = int(kline_df['time'].iloc[-1] // 1000)
+        kline_df['price_last'] = last_day_price.get(stock, None)
+        kline_df['minute_avg'] = (kline_df['high'] + kline_df['low']) / 2
+        kline_df['minutes_of_day'] = kline_df.trade_time.dt.hour * 60 + kline_df.trade_time.dt.minute
+
+        kline_df['price_open'] = kline_df['minute_avg'].iloc[0]
+        kline_df['pct_daily'] = (kline_df['close'] - kline_df['price_last']).div(kline_df['price_last'])
+        kline_df['pct_intraday'] = (kline_df['close'] - kline_df['price_open']).div(kline_df['price_open'])
+
+        pct_daily = kline_df['pct_daily'].iloc[-1]
+        pct_intraday = kline_df['pct_intraday'].iloc[-1]
+        rsi_3 = (kline_df.ta.rsi(length=3) / 100).fillna(0.5).iloc[-1]
+        cmo_5 = (kline_df.ta.cmo(length=5) / 100).fillna(0.).iloc[-1]
+        cmo_8 = (kline_df.ta.cmo(length=8) / 100).fillna(0.).iloc[-1]
+        kdj_9_3 = (kline_df.ta.kdj(min(9, len(kline_df)), 3) / 100).fillna(0.5).iloc[-1].tolist() 
+        willr_3 = (kline_df.ta.willr(length=3) / 100).clip(-1, 1).fillna(-0.5).iloc[-1]
+        willr_5 = (kline_df.ta.willr(length=5) / 100).clip(-1, 1).fillna(-0.5).iloc[-1]
+        willr_10 = (kline_df.ta.willr(length=min(10, len(kline_df))) / 100).clip(-1, 1).fillna(-0.5).iloc[-1]
+        dpo_5 = (kline_df.ta.dpo(length=5, lookahead=False) * 10).clip(-3, 3).fillna(0.0).iloc[-1]
+        log_return_10 = (kline_df.ta.log_return(length=10) * 10).clip(-3, 3).fillna(0.).iloc[-1]
+        log_return_5 = (kline_df.ta.log_return(length=5) * 10).clip(-3, 3).fillna(0.).iloc[-1]
+        log_return_3 = (kline_df.ta.log_return(length=3) * 10).clip(-3, 3).fillna(0.).iloc[-1]
+        zscore_10 = (kline_df.ta.zscore(length=10)).clip(-3, 3).fillna(0.).iloc[-1]
+        zscore_5 = (kline_df.ta.zscore(length=5)).clip(-3, 3).fillna(0.).iloc[-1]
+        zscore_3 = (kline_df.ta.zscore(length=3)).clip(-3, 3).fillna(0.).iloc[-1]
+        pct_volatility = (10 * (kline_df['high'] - kline_df['low']).div(kline_df['minute_avg'])).clip(-1, 1).fillna(0.).iloc[-1]
+        rolling_pct_volatility_3 =  (20 * (kline_df['high'].rolling(3, min_periods=1).max() - kline_df['low'].rolling(3, min_periods=1).min()).div(kline_df['minute_avg'])).clip(-3, 3).fillna(0.).iloc[-1]
+        rolling_pct_volatility_5 =  (20 * (kline_df['high'].rolling(5, min_periods=1).max() - kline_df['low'].rolling(5, min_periods=1).min()).div(kline_df['minute_avg'])).clip(-3, 3).fillna(0.).iloc[-1]
+        rolling_pct_volatility_10 =  (20 * (kline_df['high'].rolling(10, min_periods=1).max() - kline_df['low'].rolling(10, min_periods=1).min()).div(kline_df['minute_avg'])).clip(-3.1, 3.1).fillna(0.).iloc[-1]
+
+        feature = [ticker, trade_date, trade_time] +  (np.array([pct_daily, pct_intraday, rsi_3 , cmo_5, cmo_8] + kdj_9_3 +[willr_3, willr_5, willr_10, dpo_5, log_return_3, log_return_5, log_return_10, zscore_3, zscore_5, zscore_10, pct_volatility, rolling_pct_volatility_3, rolling_pct_volatility_5, rolling_pct_volatility_10]) * 10000).clip(-2**15, 2**15-1).round().tolist()
+        features.append(feature)
+    return response.json({"data": features})
 
 if __name__ == '__main__':
     app = Sanic(name='xtquant')
